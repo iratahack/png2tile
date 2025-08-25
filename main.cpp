@@ -124,7 +124,6 @@ Image *read_png_file(const char *filename, bool quiet) {
     state.info_raw.colortype = LCT_PALETTE;
     state.info_raw.bitdepth = 8;
 
-
     if(!error) error = lodepng::decode(image->pixels, image->width, image->height, state, png);
     if (error) {
         std::cout << "[read_png_file] decoder error " << error << ": "<< lodepng_error_text(error) << std::endl;
@@ -132,7 +131,55 @@ Image *read_png_file(const char *filename, bool quiet) {
         return nullptr;
     }
 
-    // Remove all colors after the first 16 palette entries.
+    // Deduplicate palette colors and remap pixels
+    std::vector<Color> orig_palette;
+    unsigned orig_pal_size = state.info_png.color.palettesize;
+    for (unsigned i = 0; i < orig_pal_size; ++i) {
+        Color c;
+        c.red = state.info_png.color.palette[i * 4];
+        c.green = state.info_png.color.palette[i * 4 + 1];
+        c.blue = state.info_png.color.palette[i * 4 + 2];
+        orig_palette.push_back(c);
+    }
+
+    // Build new palette and remap table
+    std::vector<Color> new_palette;
+    std::vector<unsigned char> remap(orig_pal_size, 0);
+    for (unsigned i = 0; i < orig_pal_size; ++i) {
+        bool found = false;
+        unsigned char idx = 0;
+        for (unsigned j = 0; j < new_palette.size(); ++j) {
+            if (orig_palette[i].red == new_palette[j].red &&
+                orig_palette[i].green == new_palette[j].green &&
+                orig_palette[i].blue == new_palette[j].blue) {
+                found = true;
+                idx = (unsigned char)j;
+                break;
+            }
+        }
+        if (!found) {
+            if (new_palette.size() < MAX_COLOURS) {
+                idx = (unsigned char)new_palette.size();
+                new_palette.push_back(orig_palette[i]);
+            } else {
+                // If more than 16 unique colors, map to 0
+                idx = 0;
+            }
+        }
+        remap[i] = idx;
+    }
+
+    // Remap pixels
+    for (unsigned int i = 0; i < image->pixels.size(); ++i) {
+        unsigned char old_idx = image->pixels[i];
+        if (old_idx < remap.size()) {
+            image->pixels[i] = remap[old_idx];
+        } else {
+            image->pixels[i] = 0;
+        }
+    }
+
+    // Remove all colors after the first 16 palette entries (now deduped)
     for (unsigned int y = 0; y < image->height; y++) {
         for (unsigned int x = 0; x < image->width; x++) {
             if (image->pixels[x + y * image->width] >= MAX_COLOURS) {
@@ -142,11 +189,10 @@ Image *read_png_file(const char *filename, bool quiet) {
         }
     }
 
+    // Write deduped palette to image->palette, pad with white if needed
     for(int i = 0; i < MAX_COLOURS; i++) {
-        if (i < state.info_png.color.palettesize) {
-            image->palette[i].red = state.info_png.color.palette[i * 4];
-            image->palette[i].green = state.info_png.color.palette[i * 4 + 1];
-            image->palette[i].blue = state.info_png.color.palette[i * 4 + 2];
+        if (i < (int)new_palette.size()) {
+            image->palette[i] = new_palette[i];
         } else {
             image->palette[i].red   = 0;
             image->palette[i].green = 0;
